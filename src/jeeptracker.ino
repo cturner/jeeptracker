@@ -14,6 +14,10 @@
 
 Adafruit_GPS GPS(&GPSSerial);
 uint32_t timer = millis();
+uint32_t lastPublish = 0;
+
+const uint32_t PUBLISH_INTERVAL_MS = 30000;
+const float MOTION_THRESHOLD_MPH = 2.0f;
 
 // Let Device OS manage the connection to the Particle Cloud
 SYSTEM_MODE(AUTOMATIC);
@@ -43,6 +47,24 @@ float metersToFeet(float meters) {
 
 float knotsToMph(float knots) {
     return knots * 1.150779f;
+}
+
+bool isInMotion() {
+    return GPS.fix && knotsToMph(GPS.speed) >= MOTION_THRESHOLD_MPH;
+}
+
+void publishLocation() {
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,\"sat\":%d}",
+        GPS.latitudeDegrees,
+        GPS.longitudeDegrees,
+        knotsToMph(GPS.speed),
+        metersToFeet(GPS.altitude),
+        GPS.angle,
+        (int)GPS.satellites);
+    Particle.publish("location", buf, PRIVATE);
+    Serial.printlnf("Published: %s", buf);
 }
 
 
@@ -137,6 +159,11 @@ void loop() {
       Serial.println((int)GPS.satellites);
     }
 
+  }
+
+  if (isInMotion() && (millis() - lastPublish >= PUBLISH_INTERVAL_MS)) {
+    lastPublish = millis();
+    publishLocation();
   }
 }
 
