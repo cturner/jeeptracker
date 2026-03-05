@@ -9,14 +9,19 @@
 // Include Particle Device OS APIs
 #include "Particle.h"
 #include "Adafruit_GPS.h"
+#include "canbus.h"
 
 #define GPSSerial Serial1
+#define CANSerial Serial2
 
 Adafruit_GPS GPS(&GPSSerial);
+CanBus canbus;
 uint32_t timer = 0;
 uint32_t lastPublish = 0;
+uint32_t lastCanPublish = 0;
 
 const uint32_t PUBLISH_INTERVAL_MS = 30000;
+const uint32_t CAN_PUBLISH_INTERVAL_MS = 10000;
 const float MOTION_THRESHOLD_MPH = 2.0f;
 
 // Let Device OS manage the connection to the Particle Cloud
@@ -38,6 +43,10 @@ void setup() {
 
   delay(1000);
   GPSSerial.println(PMTK_Q_RELEASE);
+
+  // CAN bus module on Serial2 (RX/TX2 pins)
+  canbus.begin(CANSerial);
+
   Serial.println("setup complete!");
 }
 
@@ -55,19 +64,39 @@ bool isInMotion() {
 
 void publishLocation() {
     char buf[256];
+    const CanTelemetry &can = canbus.telemetry();
     snprintf(buf, sizeof(buf),
-        "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,\"sat\":%d}",
+        "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
+        "\"sat\":%d,\"rpm\":%u,\"thr\":%.1f}",
         (float)GPS.latitudeDegrees,
         (float)GPS.longitudeDegrees,
         knotsToMph(GPS.speed),
         metersToFeet(GPS.altitude),
         (float)GPS.angle,
-        (int)GPS.satellites);
+        (int)GPS.satellites,
+        (unsigned)can.rpm,
+        (double)can.throttlePct);
     if (Particle.connected()) {
         Particle.publish("location", buf, PRIVATE);
         Serial.printlnf("Published: %s", buf);
     } else {
         Serial.printlnf("Cloud offline, skipped publish: %s", buf);
+    }
+}
+
+void publishCanTelemetry() {
+    const CanTelemetry &can = canbus.telemetry();
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+        "{\"rpm\":%u,\"thr\":%.1f,\"eng\":\"%s\"}",
+        (unsigned)can.rpm,
+        (double)can.throttlePct,
+        can.engineState == EngineState::RUNNING ? "on" : "off");
+    if (Particle.connected()) {
+        Particle.publish("canbus", buf, PRIVATE);
+        Serial.printlnf("Published CAN: %s", buf);
+    } else {
+        Serial.printlnf("Cloud offline, skipped CAN publish: %s", buf);
     }
 }
 
@@ -165,9 +194,19 @@ void loop() {
 
   }
 
+  // Poll CAN bus for incoming frames
+  canbus.poll();
+
   if ((millis() - lastPublish >= PUBLISH_INTERVAL_MS) && isInMotion()) {
     lastPublish = millis();
     publishLocation();
+  }
+
+  // Publish CAN telemetry on its own interval when engine is running
+  if ((millis() - lastCanPublish >= CAN_PUBLISH_INTERVAL_MS) &&
+      canbus.telemetry().engineState == EngineState::RUNNING) {
+    lastCanPublish = millis();
+    publishCanTelemetry();
   }
 }
 
