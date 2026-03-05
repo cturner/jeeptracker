@@ -13,7 +13,7 @@
 #define GPSSerial Serial1
 
 Adafruit_GPS GPS(&GPSSerial);
-uint32_t timer = millis();
+uint32_t timer = 0;
 uint32_t lastPublish = 0;
 
 const uint32_t PUBLISH_INTERVAL_MS = 30000;
@@ -57,14 +57,18 @@ void publishLocation() {
     char buf[256];
     snprintf(buf, sizeof(buf),
         "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,\"sat\":%d}",
-        GPS.latitudeDegrees,
-        GPS.longitudeDegrees,
+        (float)GPS.latitudeDegrees,
+        (float)GPS.longitudeDegrees,
         knotsToMph(GPS.speed),
         metersToFeet(GPS.altitude),
-        GPS.angle,
+        (float)GPS.angle,
         (int)GPS.satellites);
-    Particle.publish("location", buf, PRIVATE);
-    Serial.printlnf("Published: %s", buf);
+    if (Particle.connected()) {
+        Particle.publish("location", buf, PRIVATE);
+        Serial.printlnf("Published: %s", buf);
+    } else {
+        Serial.printlnf("Cloud offline, skipped publish: %s", buf);
+    }
 }
 
 
@@ -90,22 +94,22 @@ void loop() {
     // Time in seconds keeps increasing after we get the NMEA sentence.
     // This estimate will lag real time due to transmission and parsing delays,
     // but the lag should be small and should also be consistent.
-    float s = GPS.seconds + GPS.milliseconds / 1000. + GPS.secondsSinceTime();
+    float s = GPS.seconds + GPS.milliseconds / 1000.0f + GPS.secondsSinceTime();
     int m = GPS.minute;
     int h = GPS.hour;
     int d = GPS.day;
     // Adjust time and day forward to account for elapsed time.
     // This will break at month boundaries!!! Humans will have to cope with
     // April 31,32 etc.
-    while (s > 60) {
+    while (s >= 60) {
       s -= 60;
       m++;
     }
-    while (m > 60) {
+    while (m >= 60) {
       m -= 60;
       h++;
     }
-    while (h > 24) {
+    while (h >= 24) {
       h -= 24;
       d++;
     }
@@ -161,7 +165,7 @@ void loop() {
 
   }
 
-  if (isInMotion() && (millis() - lastPublish >= PUBLISH_INTERVAL_MS)) {
+  if ((millis() - lastPublish >= PUBLISH_INTERVAL_MS) && isInMotion()) {
     lastPublish = millis();
     publishLocation();
   }
