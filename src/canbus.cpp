@@ -36,12 +36,6 @@ void CanBus::poll() {
             _rxLen = 0; // overflow, discard
         }
     }
-
-    // Periodically request throttle position via OBD-II
-    if (millis() - _lastThrottleReqMs >= THROTTLE_POLL_MS) {
-        _lastThrottleReqMs = millis();
-        requestThrottle();
-    }
 }
 
 // Parse a completed line from the serial CAN module.
@@ -59,8 +53,6 @@ void CanBus::processLine(const char *line, uint8_t len) {
 
     if (id == CAN_ID_RPM_SPEED) {
         handleRpmSpeed(data, dlc);
-    } else if (id == CAN_ID_OBD_RESPONSE) {
-        handleObdResponse(data, dlc);
     }
 }
 
@@ -123,51 +115,6 @@ void CanBus::handleRpmSpeed(const uint8_t *data, uint8_t dlc) {
             Serial.printlnf("[CAN] ENGINE STOP detected (RPM: %u)", newRpm);
         }
     }
-}
-
-void CanBus::handleObdResponse(const uint8_t *data, uint8_t dlc) {
-    // OBD-II response format: [numBytes, 0x41, PID, A, B, ...]
-    if (dlc < 4) return;
-    if (data[1] != 0x41) return; // not a Mode 01 response
-
-    uint8_t pid = data[2];
-
-    if (pid == OBD_PID_THROTTLE && dlc >= 4) {
-        // Throttle position: A * 100 / 255
-        _tel.throttlePct = data[3] * 100.0f / 255.0f;
-        _tel.lastThrottleMs = millis();
-        Serial.printlnf("[CAN] Throttle: %.1f%%", (double)_tel.throttlePct);
-    } else if (pid == OBD_PID_RPM && dlc >= 5) {
-        // RPM from OBD: ((A * 256) + B) / 4
-        uint16_t obdRpm = (((uint16_t)data[3] << 8) | data[4]) / 4;
-        Serial.printlnf("[CAN] OBD RPM: %u", obdRpm);
-        // Only use OBD RPM if we haven't seen 0x322 recently
-        if (millis() - _tel.lastRpmMs > 2000) {
-            _tel.rpm = obdRpm;
-            _tel.lastRpmMs = millis();
-        }
-    }
-}
-
-void CanBus::requestThrottle() {
-    // OBD-II request: 2 bytes payload, Mode 01, PID 0x11
-    uint8_t frame[8] = {0x02, OBD_MODE_CURRENT, OBD_PID_THROTTLE,
-                        0x00, 0x00, 0x00, 0x00, 0x00};
-    sendFrame(CAN_ID_OBD_REQUEST, 8, frame);
-}
-
-void CanBus::sendFrame(uint16_t id, uint8_t dlc, const uint8_t *data) {
-    if (!_serial) return;
-
-    // Format: "t<3 hex id><dlc><hex data>\r"
-    char buf[32];
-    int pos = snprintf(buf, sizeof(buf), "t%03X%01X", id, dlc);
-    for (uint8_t i = 0; i < dlc; i++) {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "%02X", data[i]);
-    }
-    buf[pos++] = '\r';
-    buf[pos] = '\0';
-    _serial->print(buf);
 }
 
 uint8_t CanBus::hexNibble(char c) {

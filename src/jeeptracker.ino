@@ -67,15 +67,14 @@ void publishLocation() {
     const CanTelemetry &can = canbus.telemetry();
     snprintf(buf, sizeof(buf),
         "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
-        "\"sat\":%d,\"rpm\":%u,\"thr\":%.1f}",
+        "\"sat\":%d,\"rpm\":%u}",
         (float)GPS.latitudeDegrees,
         (float)GPS.longitudeDegrees,
         knotsToMph(GPS.speed),
         metersToFeet(GPS.altitude),
         (float)GPS.angle,
         (int)GPS.satellites,
-        (unsigned)can.rpm,
-        (double)can.throttlePct);
+        (unsigned)can.rpm);
     if (Particle.connected()) {
         Particle.publish("location", buf, PRIVATE);
         Serial.printlnf("Published: %s", buf);
@@ -88,9 +87,8 @@ void publishCanTelemetry() {
     const CanTelemetry &can = canbus.telemetry();
     char buf[128];
     snprintf(buf, sizeof(buf),
-        "{\"rpm\":%u,\"thr\":%.1f,\"eng\":\"%s\"}",
+        "{\"rpm\":%u,\"eng\":\"%s\"}",
         (unsigned)can.rpm,
-        (double)can.throttlePct,
         can.engineState == EngineState::RUNNING ? "on" : "off");
     if (Particle.connected()) {
         Particle.publish("canbus", buf, PRIVATE);
