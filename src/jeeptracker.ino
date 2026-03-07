@@ -12,7 +12,6 @@
 #include "canbus.h"
 
 #define GPSSerial Serial1
-#define CANSerial Serial2
 
 Adafruit_GPS GPS(&GPSSerial);
 CanBus canbus;
@@ -44,8 +43,8 @@ void setup() {
   delay(1000);
   GPSSerial.println(PMTK_Q_RELEASE);
 
-  // CAN bus module on Serial2 (RX/TX2 pins)
-  canbus.begin(CANSerial);
+  // MCP2515 CAN controller on SPI (CS=A2, INT=A1)
+  canbus.begin();
 
   Serial.println("setup complete!");
 }
