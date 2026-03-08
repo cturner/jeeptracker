@@ -18,8 +18,10 @@ CanBus canbus;
 uint32_t timer = 0;
 uint32_t lastPublish = 0;
 uint32_t lastCanPublish = 0;
+bool firstFixPublished = false;
 
 const uint32_t PUBLISH_INTERVAL_MS = 30000;
+const uint32_t IDLE_PUBLISH_INTERVAL_MS = 60000;
 const uint32_t CAN_PUBLISH_INTERVAL_MS = 10000;
 const float MOTION_THRESHOLD_MPH = 2.0f;
 
@@ -61,40 +63,37 @@ bool isInMotion() {
     return GPS.fix && knotsToMph(GPS.speed) >= MOTION_THRESHOLD_MPH;
 }
 
-void publishLocation() {
+bool publishLocation() {
+    if (!Particle.connected()) return false;
     char buf[256];
     const CanTelemetry &can = canbus.telemetry();
     snprintf(buf, sizeof(buf),
         "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
-        "\"sat\":%d,\"rpm\":%u}",
+        "\"sat\":%d,\"rpm\":%u,\"bat\":%.0f}",
         (float)GPS.latitudeDegrees,
         (float)GPS.longitudeDegrees,
         knotsToMph(GPS.speed),
         metersToFeet(GPS.altitude),
         (float)GPS.angle,
         (int)GPS.satellites,
-        (unsigned)can.rpm);
-    if (Particle.connected()) {
-        Particle.publish("location", buf, PRIVATE);
-        Serial.printlnf("Published: %s", buf);
-    } else {
-        Serial.printlnf("Cloud offline, skipped publish: %s", buf);
-    }
+        (unsigned)can.rpm,
+        System.batteryCharge());
+    Particle.publish("location", buf, PRIVATE);
+    Serial.printlnf("Published: %s", buf);
+    return true;
 }
 
-void publishCanTelemetry() {
+bool publishCanTelemetry() {
+    if (!Particle.connected()) return false;
     const CanTelemetry &can = canbus.telemetry();
     char buf[128];
     snprintf(buf, sizeof(buf),
         "{\"rpm\":%u,\"eng\":\"%s\"}",
         (unsigned)can.rpm,
         can.engineState == EngineState::RUNNING ? "on" : "off");
-    if (Particle.connected()) {
-        Particle.publish("canbus", buf, PRIVATE);
-        Serial.printlnf("Published CAN: %s", buf);
-    } else {
-        Serial.printlnf("Cloud offline, skipped CAN publish: %s", buf);
-    }
+    Particle.publish("canbus", buf, PRIVATE);
+    Serial.printlnf("Published CAN: %s", buf);
+    return true;
 }
 
 
@@ -194,16 +193,21 @@ void loop() {
   // Poll CAN bus for incoming frames
   canbus.poll();
 
-  if ((millis() - lastPublish >= PUBLISH_INTERVAL_MS) && isInMotion()) {
+  if (!firstFixPublished && GPS.fix && publishLocation()) {
+    firstFixPublished = true;
     lastPublish = millis();
-    publishLocation();
+  }
+
+  uint32_t publishInterval = isInMotion() ? PUBLISH_INTERVAL_MS : IDLE_PUBLISH_INTERVAL_MS;
+  if (millis() - lastPublish >= publishInterval && publishLocation()) {
+    lastPublish = millis();
   }
 
   // Publish CAN telemetry on its own interval when engine is running
   if ((millis() - lastCanPublish >= CAN_PUBLISH_INTERVAL_MS) &&
-      canbus.telemetry().engineState == EngineState::RUNNING) {
+      canbus.telemetry().engineState == EngineState::RUNNING &&
+      publishCanTelemetry()) {
     lastCanPublish = millis();
-    publishCanTelemetry();
   }
 }
 

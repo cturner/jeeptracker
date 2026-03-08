@@ -7,16 +7,16 @@ void CanBus::begin() {
 
     // Initialize MCP2515: accept all IDs, 500 kbps, 8 MHz crystal
     if (_can.begin(MCP_ANY, CAN_500KBPS, MCP_8MHZ) == CAN_OK) {
+        _can.setMode(MCP_NORMAL);
+        _initialized = true;
         Serial.println("[CAN] MCP2515 initialized at 500 kbps");
     } else {
-        Serial.println("[CAN] MCP2515 init FAILED");
+        Serial.println("[CAN] MCP2515 not present or init FAILED - CAN disabled");
     }
-
-    // Must switch from default loopback mode to normal mode
-    _can.setMode(MCP_NORMAL);
 }
 
 void CanBus::poll() {
+    if (!_initialized) return;
     // Check INT pin (active low) for pending messages
     if (digitalRead(CAN_INT_PIN) == LOW) {
         long unsigned int rxId;

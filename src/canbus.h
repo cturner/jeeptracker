@@ -43,6 +43,7 @@ public:
 private:
     MCP_CAN _can{CAN_CS_PIN};
     CanTelemetry _tel = {};
+    bool _initialized = false;
 
     void handleRpmSpeed(const uint8_t *data, uint8_t dlc);
 };
