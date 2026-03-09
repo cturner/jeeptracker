@@ -142,8 +142,9 @@ bool publishLocation(bool stale) {
 
     const CanTelemetry &can = canbus.telemetry();
     float battPct = System.batteryCharge();
-    // Boron BATT pin: 3.3V ref, 12-bit ADC, voltage divider ratio
-    float battV = analogRead(BATT) * (3.3f / 4096.0f) * 2.0f;
+    // Boron fuel gauge (MAX17043) provides voltage directly
+    FuelGauge fuel;
+    float battV = fuel.getVCell();
 
     char buf[300];
     snprintf(buf, sizeof(buf),
