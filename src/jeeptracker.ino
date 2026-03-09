@@ -176,29 +176,53 @@ void readCellInfo() {
     // AT+CREG? returns registration: +CREG: <n>,<stat>[,<lac>,<ci>]
     // We use CREG for LAC+CID, and COPS for MCC/MNC
 
-    // First get registration info (LAC + Cell ID)
-    int ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG=2\r\n");
+    // Get EPS registration info (LAC + Cell ID)
+    // LTE Cat M1 uses AT+CEREG, not AT+CREG
+    int ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CEREG=2\r\n");
     if (ret != RESP_OK) {
-        Serial.println("[CELL] CREG=2 failed");
+        Serial.println("[CELL] CEREG=2 failed");
     }
     delay(100);
 
     atResponseLen = 0;
     memset(atResponseBuf, 0, sizeof(atResponseBuf));
-    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG?\r\n");
+    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CEREG?\r\n");
 
     if (ret == RESP_OK && atResponseLen > 0) {
-        // Parse: +CREG: 2,1,"XXXX","XXXXXXXX"
-        // or:    +CREG: 2,1,"XXXX","XXXXXXXX",<AcT>
-        char *p = strstr(atResponseBuf, "+CREG:");
+        // Parse: +CEREG: 2,1,"XXXX","XXXXXXXX",7
+        char *p = strstr(atResponseBuf, "+CEREG:");
         if (p) {
             int n, stat;
             char lacStr[8] = {0}, cidStr[16] = {0};
-            int parsed = sscanf(p, "+CREG: %d,%d,\"%7[^\"]\",\"%15[^\"]\"", &n, &stat, lacStr, cidStr);
+            int parsed = sscanf(p, "+CEREG: %d,%d,\"%7[^\"]\",\"%15[^\"]\"", &n, &stat, lacStr, cidStr);
             if (parsed >= 4) {
                 cellInfo.lac = (int)strtol(lacStr, NULL, 16);
                 cellInfo.cid = (int)strtol(cidStr, NULL, 16);
                 Serial.printlnf("[CELL] LAC=%d CID=%d", cellInfo.lac, cellInfo.cid);
+            }
+        }
+    }
+
+    // Fallback to CREG if CEREG didn't return LAC/CID (2G/3G fallback)
+    if (cellInfo.lac == 0 && cellInfo.cid == 0) {
+        atResponseLen = 0;
+        memset(atResponseBuf, 0, sizeof(atResponseBuf));
+        Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG=2\r\n");
+        delay(100);
+        atResponseLen = 0;
+        memset(atResponseBuf, 0, sizeof(atResponseBuf));
+        ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG?\r\n");
+        if (ret == RESP_OK && atResponseLen > 0) {
+            char *p = strstr(atResponseBuf, "+CREG:");
+            if (p) {
+                int n, stat;
+                char lacStr[8] = {0}, cidStr[16] = {0};
+                int parsed = sscanf(p, "+CREG: %d,%d,\"%7[^\"]\",\"%15[^\"]\"", &n, &stat, lacStr, cidStr);
+                if (parsed >= 4) {
+                    cellInfo.lac = (int)strtol(lacStr, NULL, 16);
+                    cellInfo.cid = (int)strtol(cidStr, NULL, 16);
+                    Serial.printlnf("[CELL] LAC=%d CID=%d (via CREG)", cellInfo.lac, cellInfo.cid);
+                }
             }
         }
     }
