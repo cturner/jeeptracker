@@ -68,6 +68,17 @@ const float BATTERY_CRITICAL_PCT = 8.0f;
 float lastLat = 0, lastLon = 0, lastAlt = 0, lastHdg = 0;
 bool  hasLastPosition = false;
 
+// ── Cell tower info ─────────────────────────────────────────────────────
+struct CellInfo {
+    int mcc;
+    int mnc;
+    int lac;
+    int cid;
+    int rssi;
+    bool valid;
+};
+CellInfo cellInfo = {0, 0, 0, 0, 0, false};
+
 // ── System config ───────────────────────────────────────────────────────
 SYSTEM_MODE(AUTOMATIC);
 SYSTEM_THREAD(ENABLED);
@@ -87,6 +98,9 @@ void  configResponseHandler(const char *event, const char *data);
 void  enterSentry();
 void  sentryWakeCycle();
 int   getSleepInterval();
+void  gpsStandby();
+void  gpsWake();
+void  readCellInfo();
 
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -104,14 +118,144 @@ bool isInMotion() {
 }
 
 bool hasPower() {
-    // System.powerSource() returns POWER_SOURCE_VIN, POWER_SOURCE_USB_HOST,
-    // POWER_SOURCE_USB_ADAPTER, POWER_SOURCE_USB_OTG, or POWER_SOURCE_BATTERY
     int ps = System.powerSource();
     return (ps != POWER_SOURCE_BATTERY && ps != POWER_SOURCE_UNKNOWN);
 }
 
 bool isEngineRunning() {
     return canbus.telemetry().engineState == EngineState::RUNNING;
+}
+
+
+// ── GPS power management ────────────────────────────────────────────────
+
+void gpsStandby() {
+    // PMTK161,0 = standby mode (~50µA, retains almanac for warm fix)
+    // GPS wakes on any serial input
+    GPSSerial.println("$PMTK161,0*28");
+    delay(100);
+    Serial.println("[GPS] Entered standby mode");
+}
+
+void gpsWake() {
+    // Any serial data wakes the GPS from standby
+    // Send a dummy byte then reconfigure
+    GPSSerial.println("");
+    delay(250);  // give it a moment to wake
+    GPS.begin(9600);
+    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+    GPS.sendCommand(PGCMD_ANTENNA);
+    Serial.println("[GPS] Woke from standby");
+}
+
+
+// ── Cell tower info ─────────────────────────────────────────────────────
+
+// Callback buffer for AT command response
+static char atResponseBuf[256];
+static int atResponseLen = 0;
+
+int atCallback(int type, const char* buf, int len, char* out) {
+    if (type == TYPE_PLUS) {
+        // Copy response data, leave room for null
+        int copyLen = (len < 255) ? len : 255;
+        memcpy(out + atResponseLen, buf, copyLen);
+        atResponseLen += copyLen;
+        out[atResponseLen] = '\0';
+    }
+    return WAIT;
+}
+
+void readCellInfo() {
+    cellInfo.valid = false;
+    atResponseLen = 0;
+    memset(atResponseBuf, 0, sizeof(atResponseBuf));
+
+    // AT+COPS? returns current operator: +COPS: <mode>,<format>,<oper>,<AcT>
+    // AT+CREG? returns registration: +CREG: <n>,<stat>[,<lac>,<ci>]
+    // We use CREG for LAC+CID, and COPS for MCC/MNC
+
+    // First get registration info (LAC + Cell ID)
+    int ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG=2\r\n");
+    if (ret != RESP_OK) {
+        Serial.println("[CELL] CREG=2 failed");
+    }
+    delay(100);
+
+    atResponseLen = 0;
+    memset(atResponseBuf, 0, sizeof(atResponseBuf));
+    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG?\r\n");
+
+    if (ret == RESP_OK && atResponseLen > 0) {
+        // Parse: +CREG: 2,1,"XXXX","XXXXXXXX"
+        // or:    +CREG: 2,1,"XXXX","XXXXXXXX",<AcT>
+        char *p = strstr(atResponseBuf, "+CREG:");
+        if (p) {
+            int n, stat;
+            char lacStr[8] = {0}, cidStr[16] = {0};
+            int parsed = sscanf(p, "+CREG: %d,%d,\"%7[^\"]\",\"%15[^\"]\"", &n, &stat, lacStr, cidStr);
+            if (parsed >= 4) {
+                cellInfo.lac = (int)strtol(lacStr, NULL, 16);
+                cellInfo.cid = (int)strtol(cidStr, NULL, 16);
+                Serial.printlnf("[CELL] LAC=%d CID=%d", cellInfo.lac, cellInfo.cid);
+            }
+        }
+    }
+
+    // Get operator info (MCC+MNC)
+    atResponseLen = 0;
+    memset(atResponseBuf, 0, sizeof(atResponseBuf));
+    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+COPS=3,2\r\n");
+    delay(100);
+
+    atResponseLen = 0;
+    memset(atResponseBuf, 0, sizeof(atResponseBuf));
+    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+COPS?\r\n");
+
+    if (ret == RESP_OK && atResponseLen > 0) {
+        // Parse: +COPS: 0,2,"310410",7
+        char *p = strstr(atResponseBuf, "+COPS:");
+        if (p) {
+            char operStr[16] = {0};
+            int mode, fmt;
+            int parsed = sscanf(p, "+COPS: %d,%d,\"%15[^\"]\"", &mode, &fmt, operStr);
+            if (parsed >= 3 && strlen(operStr) >= 5) {
+                // MCC is first 3 digits, MNC is rest
+                char mccStr[4] = {0};
+                strncpy(mccStr, operStr, 3);
+                cellInfo.mcc = atoi(mccStr);
+                cellInfo.mnc = atoi(operStr + 3);
+                Serial.printlnf("[CELL] MCC=%d MNC=%d", cellInfo.mcc, cellInfo.mnc);
+            }
+        }
+    }
+
+    // Get signal strength
+    atResponseLen = 0;
+    memset(atResponseBuf, 0, sizeof(atResponseBuf));
+    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CSQ\r\n");
+
+    if (ret == RESP_OK && atResponseLen > 0) {
+        char *p = strstr(atResponseBuf, "+CSQ:");
+        if (p) {
+            int csq, ber;
+            if (sscanf(p, "+CSQ: %d,%d", &csq, &ber) >= 1 && csq != 99) {
+                // Convert CSQ to approximate dBm: dBm = -113 + 2*csq
+                cellInfo.rssi = -113 + 2 * csq;
+                Serial.printlnf("[CELL] RSSI=%d dBm (CSQ=%d)", cellInfo.rssi, csq);
+            }
+        }
+    }
+
+    // Valid if we got at least LAC and CID
+    cellInfo.valid = (cellInfo.lac > 0 && cellInfo.cid > 0);
+    if (cellInfo.valid) {
+        Serial.printlnf("[CELL] Info: MCC=%d MNC=%d LAC=%d CID=%d RSSI=%d",
+            cellInfo.mcc, cellInfo.mnc, cellInfo.lac, cellInfo.cid, cellInfo.rssi);
+    } else {
+        Serial.println("[CELL] Could not read cell info");
+    }
 }
 
 
@@ -142,19 +286,38 @@ bool publishLocation(bool stale) {
 
     const CanTelemetry &can = canbus.telemetry();
     float battPct = System.batteryCharge();
-    // Boron fuel gauge (MAX17043) provides voltage directly
     FuelGauge fuel;
     float battV = fuel.getVCell();
 
-    char buf[300];
-    snprintf(buf, sizeof(buf),
-        "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
-        "\"sat\":%d,\"rpm\":%u,\"bat\":%.0f,\"batv\":%.2f,\"pwr\":%d%s}",
-        lat, lon, spd, alt, hdg, sat,
-        (unsigned)can.rpm,
-        battPct, battV,
-        hasPower() ? 1 : 0,
-        stale ? ",\"stale\":true" : "");
+    // Read cell tower info (modem is already connected, ~10ms)
+    readCellInfo();
+
+    // Build payload — keep under 1024 byte Particle.publish limit
+    char buf[512];
+    int len;
+
+    if (cellInfo.valid) {
+        len = snprintf(buf, sizeof(buf),
+            "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
+            "\"sat\":%d,\"rpm\":%u,\"bat\":%.0f,\"batv\":%.2f,\"pwr\":%d,"
+            "\"cell\":{\"mcc\":%d,\"mnc\":%d,\"lac\":%d,\"cid\":%d,\"rssi\":%d}"
+            "%s}",
+            lat, lon, spd, alt, hdg, sat,
+            (unsigned)can.rpm,
+            battPct, battV,
+            hasPower() ? 1 : 0,
+            cellInfo.mcc, cellInfo.mnc, cellInfo.lac, cellInfo.cid, cellInfo.rssi,
+            stale ? ",\"stale\":true" : "");
+    } else {
+        len = snprintf(buf, sizeof(buf),
+            "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
+            "\"sat\":%d,\"rpm\":%u,\"bat\":%.0f,\"batv\":%.2f,\"pwr\":%d%s}",
+            lat, lon, spd, alt, hdg, sat,
+            (unsigned)can.rpm,
+            battPct, battV,
+            hasPower() ? 1 : 0,
+            stale ? ",\"stale\":true" : "");
+    }
 
     Particle.publish("location", buf, PRIVATE);
     Serial.printlnf("[PUB] %s", buf);
@@ -178,8 +341,6 @@ bool publishCanTelemetry() {
 // ── Server config polling ───────────────────────────────────────────────
 
 void configResponseHandler(const char *event, const char *data) {
-    // Parse {"mode":"normal|stolen","interval_s":1800}
-    // Minimal JSON parse — no library, just find the values
     String s(data);
     Serial.printlnf("[CFG] Response: %s", data);
 
@@ -201,7 +362,6 @@ void pollServerConfig() {
     Particle.publish("config_request", buf, PRIVATE);
     Serial.printlnf("[CFG] Requesting config (bat=%.0f)", battPct);
 
-    // Wait for response (async via subscription)
     uint32_t start = millis();
     while (!configReceived && (millis() - start < CONFIG_WAIT_MS)) {
         Particle.process();
@@ -233,11 +393,8 @@ int getSleepInterval() {
 void sentryWakeCycle() {
     Serial.println("[SENTRY] Wake cycle starting");
 
-    // Re-init GPS
-    GPS.begin(9600);
-    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
-    GPS.sendCommand(PGCMD_ANTENNA);
+    // Wake GPS from standby (warm fix, almanac retained)
+    gpsWake();
 
     // Try to get a GPS fix (up to 90s)
     bool gotFix = false;
@@ -253,7 +410,6 @@ void sentryWakeCycle() {
                 millis() - fixStart, GPS.satellites);
             break;
         }
-        // Also let cloud connect in parallel
         Particle.process();
         delay(10);
     }
@@ -269,11 +425,8 @@ void sentryWakeCycle() {
     }
 
     if (Particle.connected()) {
-        // Publish location (stale if no fix)
         publishLocation(!gotFix);
         delay(1100);  // rate limit: 1 publish/sec
-
-        // Poll server for mode + interval
         pollServerConfig();
     } else {
         Serial.println("[SENTRY] Cloud connect failed, sleeping with defaults");
@@ -285,22 +438,23 @@ void sentryWakeCycle() {
         currentMode = TrackerMode::DRIVING;
         engineOffPending = false;
         firstFixPublished = false;
-        // Re-init CAN
         canbus.begin();
-        return;  // back to loop()
+        return;  // back to loop(), GPS stays awake
     }
 
     // Check critical battery
     float batt = System.batteryCharge();
     if (batt >= 0 && batt < BATTERY_CRITICAL_PCT) {
         Serial.printlnf("[SENTRY] Battery critical (%.0f%%), hibernating", batt);
-        // Hibernate — only wake on power connect (rising edge on USB detect)
+        gpsStandby();
         SystemSleepConfiguration hibernate;
         hibernate.mode(SystemSleepMode::HIBERNATE);
         System.sleep(hibernate);
-        // After hibernate wake, device resets (runs setup)
-        return;
+        return;  // after hibernate wake, device resets (runs setup)
     }
+
+    // Put GPS into standby before sleeping
+    gpsStandby();
 
     // Sleep for the server-specified interval
     int sleepSec = getSleepInterval();
@@ -313,7 +467,6 @@ void sentryWakeCycle() {
     SystemSleepConfiguration sleepConfig;
     sleepConfig.mode(SystemSleepMode::STOP)
                .duration(sleepSec * 1000L);
-    // Note: STOP mode retains RAM, resumes execution after System.sleep()
 
     System.sleep(sleepConfig);
 
@@ -353,15 +506,9 @@ void setup() {
 
     canbus.begin();
 
-    // Subscribe to config webhook response
     Particle.subscribe("hook-response/config_request", configResponseHandler);
 
-    // If we woke from STOP mode sleep, RAM is retained and currentMode
-    // is already set. If we're booting fresh (power-on or hibernate wake),
-    // check if we have USB power to decide initial mode.
     if (!hasPower() && !isEngineRunning()) {
-        // Likely woke from hibernate on power connect, or battery-only boot.
-        // Run one sentry cycle to check in and decide.
         Serial.println("[BOOT] No power detected, starting sentry cycle");
         sentryWakeCycle();
     } else {
@@ -376,7 +523,6 @@ void setup() {
 // ── Main loop (DRIVING mode) ────────────────────────────────────────────
 
 void loop() {
-    // If we're in sentry/stolen mode, run the wake cycle instead of loop
     if (currentMode != TrackerMode::DRIVING) {
         sentryWakeCycle();
         return;
@@ -444,15 +590,12 @@ void loop() {
     bool powered = hasPower() || isEngineRunning();
 
     if (powered) {
-        // Reset debounce if power returns
         engineOffPending = false;
     } else if (!engineOffPending) {
-        // Start debounce timer
         engineOffPending = true;
         engineOffSince = millis();
         Serial.println("[PWR] Power lost, starting 2-min debounce");
     } else if (millis() - engineOffSince >= ENGINE_OFF_DEBOUNCE_MS) {
-        // Debounce expired, transition to sentry
         Serial.println("[PWR] Debounce complete, entering sentry mode");
         enterSentry();
     }
