@@ -152,133 +152,35 @@ void gpsWake() {
 
 // ── Cell tower info ─────────────────────────────────────────────────────
 
-// Callback buffer for AT command response
-static char atResponseBuf[256];
-static int atResponseLen = 0;
-
-int atCallback(int type, const char* buf, int len, char* out) {
-    if (type == TYPE_PLUS) {
-        // Copy response data, leave room for null
-        int copyLen = (len < 255) ? len : 255;
-        memcpy(out + atResponseLen, buf, copyLen);
-        atResponseLen += copyLen;
-        out[atResponseLen] = '\0';
-    }
-    return WAIT;
-}
-
 void readCellInfo() {
     cellInfo.valid = false;
-    atResponseLen = 0;
-    memset(atResponseBuf, 0, sizeof(atResponseBuf));
 
-    // AT+COPS? returns current operator: +COPS: <mode>,<format>,<oper>,<AcT>
-    // AT+CREG? returns registration: +CREG: <n>,<stat>[,<lac>,<ci>]
-    // We use CREG for LAC+CID, and COPS for MCC/MNC
+    // Use Device OS built-in API (works across all modem types)
+    CellularGlobalIdentity cgi;
+    cgi.size = sizeof(CellularGlobalIdentity);
+    cgi.version = CGI_VERSION_LATEST;
 
-    // Get EPS registration info (LAC + Cell ID)
-    // LTE Cat M1 uses AT+CEREG, not AT+CREG
-    int ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CEREG=2\r\n");
-    if (ret != RESP_OK) {
-        Serial.println("[CELL] CEREG=2 failed");
-    }
-    delay(100);
-
-    atResponseLen = 0;
-    memset(atResponseBuf, 0, sizeof(atResponseBuf));
-    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CEREG?\r\n");
-
-    if (ret == RESP_OK && atResponseLen > 0) {
-        // Parse: +CEREG: 2,1,"XXXX","XXXXXXXX",7
-        char *p = strstr(atResponseBuf, "+CEREG:");
-        if (p) {
-            int n, stat;
-            char lacStr[8] = {0}, cidStr[16] = {0};
-            int parsed = sscanf(p, "+CEREG: %d,%d,\"%7[^\"]\",\"%15[^\"]\"", &n, &stat, lacStr, cidStr);
-            if (parsed >= 4) {
-                cellInfo.lac = (int)strtol(lacStr, NULL, 16);
-                cellInfo.cid = (int)strtol(cidStr, NULL, 16);
-                Serial.printlnf("[CELL] LAC=%d CID=%d", cellInfo.lac, cellInfo.cid);
-            }
-        }
-    }
-
-    // Fallback to CREG if CEREG didn't return LAC/CID (2G/3G fallback)
-    if (cellInfo.lac == 0 && cellInfo.cid == 0) {
-        atResponseLen = 0;
-        memset(atResponseBuf, 0, sizeof(atResponseBuf));
-        Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG=2\r\n");
-        delay(100);
-        atResponseLen = 0;
-        memset(atResponseBuf, 0, sizeof(atResponseBuf));
-        ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CREG?\r\n");
-        if (ret == RESP_OK && atResponseLen > 0) {
-            char *p = strstr(atResponseBuf, "+CREG:");
-            if (p) {
-                int n, stat;
-                char lacStr[8] = {0}, cidStr[16] = {0};
-                int parsed = sscanf(p, "+CREG: %d,%d,\"%7[^\"]\",\"%15[^\"]\"", &n, &stat, lacStr, cidStr);
-                if (parsed >= 4) {
-                    cellInfo.lac = (int)strtol(lacStr, NULL, 16);
-                    cellInfo.cid = (int)strtol(cidStr, NULL, 16);
-                    Serial.printlnf("[CELL] LAC=%d CID=%d (via CREG)", cellInfo.lac, cellInfo.cid);
-                }
-            }
-        }
-    }
-
-    // Get operator info (MCC+MNC)
-    atResponseLen = 0;
-    memset(atResponseBuf, 0, sizeof(atResponseBuf));
-    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+COPS=3,2\r\n");
-    delay(100);
-
-    atResponseLen = 0;
-    memset(atResponseBuf, 0, sizeof(atResponseBuf));
-    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+COPS?\r\n");
-
-    if (ret == RESP_OK && atResponseLen > 0) {
-        // Parse: +COPS: 0,2,"310410",7
-        char *p = strstr(atResponseBuf, "+COPS:");
-        if (p) {
-            char operStr[16] = {0};
-            int mode, fmt;
-            int parsed = sscanf(p, "+COPS: %d,%d,\"%15[^\"]\"", &mode, &fmt, operStr);
-            if (parsed >= 3 && strlen(operStr) >= 5) {
-                // MCC is first 3 digits, MNC is rest
-                char mccStr[4] = {0};
-                strncpy(mccStr, operStr, 3);
-                cellInfo.mcc = atoi(mccStr);
-                cellInfo.mnc = atoi(operStr + 3);
-                Serial.printlnf("[CELL] MCC=%d MNC=%d", cellInfo.mcc, cellInfo.mnc);
-            }
-        }
-    }
-
-    // Get signal strength
-    atResponseLen = 0;
-    memset(atResponseBuf, 0, sizeof(atResponseBuf));
-    ret = Cellular.command(atCallback, atResponseBuf, 5000, "AT+CSQ\r\n");
-
-    if (ret == RESP_OK && atResponseLen > 0) {
-        char *p = strstr(atResponseBuf, "+CSQ:");
-        if (p) {
-            int csq, ber;
-            if (sscanf(p, "+CSQ: %d,%d", &csq, &ber) >= 1 && csq != 99) {
-                // Convert CSQ to approximate dBm: dBm = -113 + 2*csq
-                cellInfo.rssi = -113 + 2 * csq;
-                Serial.printlnf("[CELL] RSSI=%d dBm (CSQ=%d)", cellInfo.rssi, csq);
-            }
-        }
-    }
-
-    // Valid if we got at least LAC and CID
-    cellInfo.valid = (cellInfo.lac > 0 && cellInfo.cid > 0);
-    if (cellInfo.valid) {
-        Serial.printlnf("[CELL] Info: MCC=%d MNC=%d LAC=%d CID=%d RSSI=%d",
-            cellInfo.mcc, cellInfo.mnc, cellInfo.lac, cellInfo.cid, cellInfo.rssi);
+    cellular_result_t res = cellular_global_identity(&cgi, NULL);
+    if (res == SYSTEM_ERROR_NONE) {
+        cellInfo.mcc = cgi.mobile_country_code;
+        cellInfo.mnc = cgi.mobile_network_code;
+        cellInfo.lac = cgi.location_area_code;
+        cellInfo.cid = cgi.cell_id;
+        cellInfo.valid = true;
+        Serial.printlnf("[CELL] MCC=%d MNC=%d LAC=%d CID=%d",
+            cellInfo.mcc, cellInfo.mnc, cellInfo.lac, cellInfo.cid);
     } else {
-        Serial.println("[CELL] Could not read cell info");
+        Serial.printlnf("[CELL] cellular_global_identity failed: %d", res);
+    }
+
+    // Signal strength via CellularSignal API
+    if (Cellular.ready()) {
+        CellularSignal sig = Cellular.RSSI();
+        float strength = sig.getStrengthValue();  // dBm
+        if (strength != 0) {
+            cellInfo.rssi = (int)strength;
+            Serial.printlnf("[CELL] RSSI=%d dBm", cellInfo.rssi);
+        }
     }
 }
 
