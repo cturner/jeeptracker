@@ -456,21 +456,37 @@ void sentryWakeCycle() {
     // Put GPS into standby before sleeping
     gpsStandby();
 
-    // Sleep for the server-specified interval
+    // Sleep in 2-minute chunks, checking for USB power on each mini-wake.
+    // This avoids needing hardware wiring to wake on USB power connect.
+    // Full sentry interval is still honored — we just check power more often.
     int sleepSec = getSleepInterval();
     currentMode = serverSaysStolen ? TrackerMode::STOLEN : TrackerMode::SENTRY;
-    Serial.printlnf("[SENTRY] Sleeping %ds (mode=%s, bat=%.0f%%)",
+    Serial.printlnf("[SENTRY] Sleeping %ds in chunks (mode=%s, bat=%.0f%%)",
         sleepSec,
         serverSaysStolen ? "STOLEN" : "normal",
         batt);
 
-    SystemSleepConfiguration sleepConfig;
-    sleepConfig.mode(SystemSleepMode::STOP)
-               .duration(sleepSec * 1000L);
+    const int CHUNK_S = 120;  // 2-minute chunks
+    int remaining = sleepSec;
 
-    System.sleep(sleepConfig);
+    while (remaining > 0) {
+        int thisSleep = (remaining < CHUNK_S) ? remaining : CHUNK_S;
 
-    // Execution resumes here after wake
+        SystemSleepConfiguration sleepConfig;
+        sleepConfig.mode(SystemSleepMode::STOP)
+                   .duration(thisSleep * 1000L);
+
+        System.sleep(sleepConfig);
+
+        // Check if USB power came back
+        if (hasPower()) {
+            Serial.println("[SENTRY] USB power detected during sleep, waking up");
+            break;
+        }
+
+        remaining -= thisSleep;
+    }
+
     Serial.println("[SENTRY] Woke from sleep");
 }
 
