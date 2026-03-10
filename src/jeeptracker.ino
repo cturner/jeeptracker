@@ -80,20 +80,6 @@ struct CellInfo {
 };
 CellInfo cellInfo = {0, 0, 0, 0, 0, false};
 
-// ── Neighbor cells (from AT+UCGED mode 5) ───────────────────────────────
-#define MAX_NEIGHBORS 6
-
-struct NeighborCell {
-    int pci;      // Physical Cell ID (0-503)
-    int earfcn;   // E-UTRA Absolute Radio Frequency Channel Number
-    int rsrp;     // Reference Signal Received Power (dBm, negative)
-    bool valid;
-};
-
-NeighborCell neighborCells[MAX_NEIGHBORS];
-int neighborCount = 0;
-bool ucgedEnabled = false;
-
 // ── System config ───────────────────────────────────────────────────────
 SYSTEM_MODE(AUTOMATIC);
 SYSTEM_THREAD(ENABLED);
@@ -116,8 +102,6 @@ int   getSleepInterval();
 void  gpsStandby();
 void  gpsWake();
 void  readCellInfo();
-void  enableUcged();
-void  readNeighborCells();
 
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -202,63 +186,6 @@ void readCellInfo() {
 }
 
 
-// ── Neighbor cell scanning (AT+UCGED mode 5) ───────────────────────────
-
-// Callback for AT+UCGED? — parses +RSRP lines
-// Format: +RSRP: <PCI>,<earfcn>,"<RSRP>",
-int ucgedCallback(int type, const char *buf, int len, int *count) {
-    if (type == TYPE_PLUS && strncmp(buf, "+RSRP:", 6) == 0 && *count < MAX_NEIGHBORS) {
-        int pci = 0, earfcn = 0;
-        char rsrpStr[16] = {0};
-        if (sscanf(buf, "+RSRP: %d,%d,\"%15[^\"]\"", &pci, &earfcn, rsrpStr) == 3) {
-            neighborCells[*count].pci = pci;
-            neighborCells[*count].earfcn = earfcn;
-            neighborCells[*count].rsrp = (int)atof(rsrpStr);
-            neighborCells[*count].valid = true;
-            (*count)++;
-        }
-    }
-    return WAIT;
-}
-
-void enableUcged() {
-    if (ucgedEnabled) return;
-    if (!Cellular.ready()) return;
-
-    int result = Cellular.command(5000, "AT+UCGED=5\r\n");
-    if (result == RESP_OK) {
-        ucgedEnabled = true;
-        Serial.println("[CELL] UCGED mode 5 enabled (RSRP/RSRQ reporting)");
-    } else {
-        Serial.printlnf("[CELL] AT+UCGED=5 failed: %d", result);
-    }
-}
-
-void readNeighborCells() {
-    neighborCount = 0;
-    for (int i = 0; i < MAX_NEIGHBORS; i++) {
-        neighborCells[i].valid = false;
-    }
-
-    if (!Cellular.ready()) return;
-
-    // Ensure UCGED mode 5 is enabled
-    enableUcged();
-    if (!ucgedEnabled) return;
-
-    int result = Cellular.command(ucgedCallback, &neighborCount, 5000, "AT+UCGED?\r\n");
-    if (result == RESP_OK) {
-        Serial.printlnf("[CELL] UCGED: %d cells visible", neighborCount);
-        for (int i = 0; i < neighborCount; i++) {
-            Serial.printlnf("[CELL]   PCI=%d EARFCN=%d RSRP=%d dBm",
-                neighborCells[i].pci, neighborCells[i].earfcn, neighborCells[i].rsrp);
-        }
-    } else {
-        Serial.printlnf("[CELL] AT+UCGED? failed: %d", result);
-    }
-}
-
-
 // ── Publish ─────────────────────────────────────────────────────────────
 
 bool publishLocation(bool stale) {
@@ -296,39 +223,22 @@ bool publishLocation(bool stale) {
     // Read cell tower info (modem is already connected, ~10ms)
     readCellInfo();
 
-    // Read neighbor cells via AT+UCGED mode 5 (~50ms)
-    readNeighborCells();
-
     // Build payload — keep under 1024 byte Particle.publish limit
-    char buf[768];
+    char buf[512];
     int len;
 
     if (cellInfo.valid) {
         len = snprintf(buf, sizeof(buf),
             "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
             "\"sat\":%d,\"rpm\":%u,\"bat\":%.0f,\"batv\":%.2f,\"pwr\":%d,"
-            "\"cell\":{\"mcc\":%d,\"mnc\":%d,\"lac\":%d,\"cid\":%d,\"rssi\":%d}",
+            "\"cell\":{\"mcc\":%d,\"mnc\":%d,\"lac\":%d,\"cid\":%d,\"rssi\":%d}"
+            "%s}",
             lat, lon, spd, alt, hdg, sat,
             (unsigned)can.rpm,
             battPct, battV,
             hasPower() ? 1 : 0,
-            cellInfo.mcc, cellInfo.mnc, cellInfo.lac, cellInfo.cid, cellInfo.rssi);
-
-        // Append neighbor cells array (compact keys: p=pci, e=earfcn, r=rsrp)
-        if (neighborCount > 0) {
-            len += snprintf(buf + len, sizeof(buf) - len, ",\"nbr\":[");
-            for (int i = 0; i < neighborCount && i < MAX_NEIGHBORS; i++) {
-                if (!neighborCells[i].valid) continue;
-                if (i > 0) len += snprintf(buf + len, sizeof(buf) - len, ",");
-                len += snprintf(buf + len, sizeof(buf) - len,
-                    "{\"p\":%d,\"e\":%d,\"r\":%d}",
-                    neighborCells[i].pci, neighborCells[i].earfcn, neighborCells[i].rsrp);
-            }
-            len += snprintf(buf + len, sizeof(buf) - len, "]");
-        }
-
-        if (stale) len += snprintf(buf + len, sizeof(buf) - len, ",\"stale\":true");
-        len += snprintf(buf + len, sizeof(buf) - len, "}");
+            cellInfo.mcc, cellInfo.mnc, cellInfo.lac, cellInfo.cid, cellInfo.rssi,
+            stale ? ",\"stale\":true" : "");
     } else {
         len = snprintf(buf, sizeof(buf),
             "{\"lat\":%.6f,\"lon\":%.6f,\"spd\":%.1f,\"alt\":%.1f,\"hdg\":%.1f,"
