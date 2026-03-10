@@ -37,6 +37,7 @@ bool firstFixPublished = false;
 const uint32_t PUBLISH_INTERVAL_MS      = 10000;  // 10s when moving
 const uint32_t IDLE_PUBLISH_INTERVAL_MS = 60000;  // 60s when stationary
 const uint32_t CAN_PUBLISH_INTERVAL_MS  = 10000;
+const uint32_t NO_FIX_PUBLISH_INTERVAL_MS = 60000;  // 60s cell-only publish when no GPS fix
 const float    MOTION_THRESHOLD_MPH     = 2.0f;
 
 // ── Power management ────────────────────────────────────────────────────
@@ -207,7 +208,11 @@ bool publishLocation(bool stale) {
         lat = lastLat; lon = lastLon; alt = lastAlt; hdg = lastHdg;
         spd = 0; sat = 0;
     } else {
-        return false;  // no fix ever, nothing to publish
+        // Cold boot, no GPS fix ever — publish cell-only payload
+        lat = 0; lon = 0; alt = 0; hdg = 0;
+        spd = 0; sat = 0;
+        stale = true;
+        Serial.println("[PUB] No GPS position available, publishing cell-only payload");
     }
 
     const CanTelemetry &can = canbus.telemetry();
@@ -351,7 +356,9 @@ void sentryWakeCycle() {
     }
 
     if (Particle.connected()) {
-        publishLocation(!gotFix);
+        if (!publishLocation(!gotFix)) {
+            Serial.println("[SENTRY] publishLocation failed (not connected?)");
+        }
         delay(1100);  // rate limit: 1 publish/sec
         pollServerConfig();
     } else {
@@ -497,6 +504,12 @@ void loop() {
     // ── Location publishing ──
     if (!firstFixPublished && GPS.fix && publishLocation()) {
         firstFixPublished = true;
+        lastPublish = millis();
+    } else if (!firstFixPublished && !GPS.fix &&
+               millis() - lastPublish >= NO_FIX_PUBLISH_INTERVAL_MS) {
+        // No GPS fix yet — publish cell-only so server knows we're alive
+        Serial.println("[LOOP] No GPS fix yet, publishing cell-only fallback");
+        publishLocation(true);
         lastPublish = millis();
     }
 
